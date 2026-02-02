@@ -4,185 +4,174 @@ import os
 import datetime
 import gspread
 import json
-import google.generativeai as genai
 from PIL import Image
 import io
+import base64
 from oauth2client.service_account import ServiceAccountCredentials
 from fastapi import FastAPI, UploadFile, File
+from openai import OpenAI
 import logging
 
 # --- LOGGING SETUP ---
-# This ensures logs show up in your Render dashboard
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("HingeWingman")
 
 app = FastAPI()
 
 # --- CONFIGURATION ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# We use the generic 'openai' client but point it to OpenRouter
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")
 SHEET_NAME = "Hinge_Rizz_Tracker"
 
-# Configure Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
-    logger.error("Gemini API Key is missing!")
+# The model you want to use. You can change this string anytime!
+# Recommended free vision models on OpenRouter:
+# "google/gemini-2.0-flash-exp:free" (Very smart, vision native)
+# "google/gemini-flash-1.5-8b"
+# "meta-llama/llama-3.2-11b-vision-instruct:free"
+MODEL_NAME = "google/gemma-3-27b-it:free" 
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
 # --- HELPER: LOG TO SHEET ---
 def log_to_sheet(data_dict):
-    """
-    Logs metadata + prompts to Google Sheets.
-    Expects data_dict to have keys: 'metadata' (dict) and 'replies' (list)
-    """
-    if not GOOGLE_CREDS_JSON: 
-        logger.warning("Google Creds missing. Skipping sheet log.")
-        return
-
+    if not GOOGLE_CREDS_JSON: return
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        sheet = client.open(SHEET_NAME).sheet1
+        g_client = gspread.authorize(creds)
+        sheet = g_client.open(SHEET_NAME).sheet1
         
-        # Extract Data
         meta = data_dict.get('metadata', {})
         replies = data_dict.get('replies', [])
-        
-        # Ensure we have 3 replies to fill columns
         replies = replies + [""] * (3 - len(replies))
         
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # New Row Format:
-        # [Timestamp, Name, Age, Job, Location, Interests, Opt1, Opt2, Opt3, Status]
         row = [
             timestamp,
             meta.get('name', 'Unknown'),
             meta.get('age', 'Unknown'),
             meta.get('job', 'Unknown'),
             meta.get('location', 'Unknown'),
-            ", ".join(meta.get('interests', [])), # Convert list to string
+            str(meta.get('interests', [])),
             replies[0],
             replies[1],
             replies[2],
             "PENDING"
         ]
-        
         sheet.append_row(row)
-        logger.info(f"Successfully logged profile: {meta.get('name', 'Unknown')}")
-        
+        logger.info(f"Logged to sheet: {meta.get('name')}")
     except Exception as e:
-        logger.error(f"Logging to sheet failed: {e}")
+        logger.error(f"Sheet logging failed: {e}")
 
 # --- HELPER: EXTRACT FRAMES ---
-def extract_frames_as_pil(video_path, max_frames=6):
-    logger.info(f"Extracting frames from {video_path}...")
+def extract_frames_base64(video_path, max_frames=5):
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    if total_frames == 0: 
-        logger.error("Video has 0 frames.")
-        return []
+    if total_frames == 0: return []
     
     interval = max(1, total_frames // max_frames)
-    pil_images = []
+    frames_b64 = []
     current_frame = 0
     
-    while current_frame < total_frames and len(pil_images) < max_frames:
+    while current_frame < total_frames and len(frames_b64) < max_frames:
         cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
         ret, frame = cap.read()
         if ret:
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(rgb_frame)
-            pil_images.append(pil_img)
+            # Resize to save tokens (OpenRouter free tier has limits)
+            frame = cv2.resize(frame, (512, 512)) 
+            _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            b64_str = base64.b64encode(buffer).decode('utf-8')
+            frames_b64.append(f"data:image/jpeg;base64,{b64_str}")
         current_frame += interval
-            
     cap.release()
-    logger.info(f"Extracted {len(pil_images)} frames.")
-    return pil_images
+    return frames_b64
 
 @app.get("/")
 def home():
-    return {"status": "Gemini Wingman is Active"}
+    return {"status": "OpenRouter Wingman is Active"}
 
 @app.post("/analyze-video")
-async def analyze_video(file: UploadFile = File(...)):
-    logger.info("Received video upload request.")
+async def analyze_video(file: UploadFile = File(None)):
+    if not file:
+        return {"reply": "Error: No file received. Check Shortcut key is 'file'."}
     
-    if not GEMINI_API_KEY:
-        return {"reply": "Error: Server missing Gemini API Key."}
+    if not OPENROUTER_API_KEY:
+        return {"reply": "Error: OpenRouter API Key missing."}
 
-    # 1. Save video temporarily
+    # 1. Save and Process Video
     temp_filename = f"temp_{file.filename}"
     with open(temp_filename, "wb") as buffer:
         buffer.write(await file.read())
 
-    # 2. Extract frames
-    frames = extract_frames_as_pil(temp_filename)
-    
-    # 3. Cleanup
-    if os.path.exists(temp_filename):
-        os.remove(temp_filename)
+    frames = extract_frames_base64(temp_filename)
+    if os.path.exists(temp_filename): os.remove(temp_filename)
 
     if not frames:
-        return {"reply": "Error: Could not process video."}
+        return {"reply": "Error: Could not extract frames."}
 
-    # 4. Prepare Prompt for Gemini
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    # 2. Build OpenRouter Payload
+    # We construct a list of image messages
+    content_payload = [
+        {"type": "text", "text": "Analyze this dating profile video. Extract metadata (Name, Age, Job, Location, Interests) and write 3 witty, high-status replies based on visual hooks. Return ONLY JSON."}
+    ]
     
-    prompt_text = """
-    You are a witty, Gen-Z dating expert. I am sending frames from a Hinge profile video.
-    
-    Task 1 (Extraction):
-    Analyze the frames to identify the user's Name, Age, Job, Location, and key Interests. 
-    If a field is not visible, return "Unknown".
-    
-    Task 2 (Generation):
-    Generate 3 distinct, high-status, witty opening lines based on the visual hooks or text prompts found.
-    
-    Format:
-    Return ONLY a valid JSON object. No Markdown.
-    {
-        "metadata": {
-            "name": "String",
-            "age": "String",
-            "job": "String",
-            "location": "String",
-            "interests": ["String", "String"]
-        },
-        "replies": ["Reply 1", "Reply 2", "Reply 3"]
-    }
-    """
-    
-    input_content = [prompt_text] + frames
+    for b64_url in frames:
+        content_payload.append({
+            "type": "image_url",
+            "image_url": {"url": b64_url}
+        })
+
+    logger.info(f"Sending request to OpenRouter model: {MODEL_NAME}")
 
     try:
-        logger.info("Sending request to Gemini...")
-        response = model.generate_content(input_content)
-        content_text = response.text
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a JSON-only dating assistant. Output format: {\"metadata\": {\"name\": \"...\", \"age\": \"...\", \"job\": \"...\", \"location\": \"...\", \"interests\": []}, \"replies\": [\"...\", \"...\", \"...\"]}"
+                },
+                {
+                    "role": "user",
+                    "content": content_payload
+                }
+            ],
+            temperature=0.8,
+            # 'headers' allows us to tell OpenRouter who we are (optional but polite)
+            extra_headers={
+                "HTTP-Referer": "https://render.com",
+                "X-Title": "Hinge Wingman"
+            }
+        )
+
+        response_text = completion.choices[0].message.content
+        logger.info("Received response from OpenRouter.")
         
-        # Clean JSON
-        clean_text = content_text.replace("```json", "").replace("```", "").strip()
+        # 3. Clean and Parse JSON
+        clean_text = response_text.replace("```json", "").replace("```", "").strip()
         
-        # Parse JSON
         try:
             data_dict = json.loads(clean_text)
-        except json.JSONDecodeError:
-            # Fallback for slight formatting errors
+        except:
+            # Simple fallback if model chats too much
             import ast
-            data_dict = ast.literal_eval(clean_text)
+            # Try to find the first { and last }
+            start = clean_text.find('{')
+            end = clean_text.rfind('}') + 1
+            if start != -1 and end != -1:
+                data_dict = json.loads(clean_text[start:end])
+            else:
+                return {"reply": clean_text} # Return raw text if JSON fails
 
-        logger.info("Gemini response parsed successfully.")
-
-        # 5. Log to Sheets (Async-ish)
+        # 4. Log and Return
         log_to_sheet(data_dict)
-        
-        # 6. Return ONLY text to iPhone
-        # We join them with newlines so the shortcut displays them cleanly
         return {"reply": "\n\n".join(data_dict.get('replies', []))}
-        
+
     except Exception as e:
-        logger.error(f"Error processing: {str(e)}")
-        return {"reply": f"Error: {str(e)}"}
+        logger.error(f"OpenRouter Error: {str(e)}")
+        return {"reply": f"AI Error: {str(e)}"}
