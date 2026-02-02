@@ -26,7 +26,7 @@ SHEET_NAME = "Hinge_Rizz_Tracker"
 
 # Let's switch to the Llama Vision model. 
 # It is generally better at following "JSON Only" instructions than Molmo.
-MODEL_NAME = "meta-llama/llama-3.2-11b-vision-instruct:free"
+MODEL_NAME = "allenai/molmo-2-8b:free"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
