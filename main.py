@@ -67,7 +67,7 @@ def log_to_sheet(data_dict):
         logger.error(f"Sheet logging failed: {str(e)}")
 
 # --- HELPER: EXTRACT FRAMES ---
-def extract_frames_base64(video_path, max_frames=5):
+def extract_frames_base64(video_path, max_frames=7):
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total_frames == 0: return []
@@ -109,7 +109,39 @@ async def analyze_video(file: UploadFile = File(None)):
     if not frames: return {"reply": "Error: Video was empty or unreadable."}
 
     # 2. Call AI
-    content_payload = [{"type": "text", "text": "Analyze this dating profile video. Extract metadata and write 3 witty replies. Return valid JSON."}]
+    content_payload = [{"type": "text", "text": "Analyze the dating profile video frames provided.
+
+Step 1: Extract structured metadata about the profile owner using ONLY visible or clearly implied information.
+Step 2: Generate exactly 3 Hinge “like comments” that feel natural and reply-worthy.
+
+Metadata schema:
+{
+  "name": string | null,
+  "age": number | null,
+  "job": string | null,
+  "location": string | null,
+  "interests": array of strings,
+  "vibe": string
+}
+
+Reply generation rules:
+1. Each reply must be based on a DIFFERENT observation
+2. At least one reply must spark curiosity
+3. At least one reply must include light, respectful teasing
+4. Avoid compliments that could apply to anyone
+5. No emojis unless it feels extremely natural (max 1 per reply)
+6. Replies must sound like something a real person would send
+
+Output JSON format:
+{
+  "metadata": { ... },
+  "replies": [
+    "reply one",
+    "reply two",
+    "reply three"
+  ]
+}
+"}]
     for b64_url in frames:
         content_payload.append({"type": "image_url", "image_url": {"url": b64_url}})
 
@@ -121,7 +153,27 @@ async def analyze_video(file: UploadFile = File(None)):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a JSON-only dating assistant. Output must be valid JSON with keys 'metadata' and 'replies' (list of strings)."
+                    "content": "You are an emotionally intelligent dating assistant specialized in Hinge profiles.
+
+CRITICAL RULES:
+- Output ONLY valid JSON. No markdown. No explanations.
+- Never mention that you are an AI.
+- Never explain your reasoning.
+
+Dating psychology principles you must follow:
+- Women respond best to specificity, emotional attunement, curiosity, and calm confidence
+- Avoid generic compliments, sexual remarks, pickup lines, or validation-seeking
+- Do NOT sound impressed or desperate
+- Do NOT ask yes/no questions
+- Do NOT comment explicitly on body parts
+
+Tone:
+- Warm, grounded, subtly playful
+- Observant rather than funny-forcing
+- 1–2 sentences max per reply
+
+Your goal is to maximize reply probability, not to impress.
+"
                 },
                 {
                     "role": "user",
