@@ -130,7 +130,7 @@ async def analyze_video(file: UploadFile = File(...)):
         return {"reply": "Error: Could not process video."}
 
     # 4. Prepare Prompt for Gemini
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     prompt_text = """
     You are a witty, Gen-Z dating expert. I am sending frames from a Hinge profile video.
