@@ -1,99 +1,188 @@
 import cv2
 import numpy as np
-import base64
-import requests
 import os
 import datetime
 import gspread
+import json
+import google.generativeai as genai
+from PIL import Image
+import io
 from oauth2client.service_account import ServiceAccountCredentials
 from fastapi import FastAPI, UploadFile, File
-import json
+import logging
+
+# --- LOGGING SETUP ---
+# This ensures logs show up in your Render dashboard
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("HingeWingman")
 
 app = FastAPI()
 
 # --- CONFIGURATION ---
-GROK_API_KEY = os.environ.get("GROK_API_KEY")
-GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON") # We will paste the JSON key here
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")
 SHEET_NAME = "Hinge_Rizz_Tracker"
 
+# Configure Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logger.error("Gemini API Key is missing!")
+
 # --- HELPER: LOG TO SHEET ---
-def log_to_sheet(prompt_options):
+def log_to_sheet(data_dict):
+    """
+    Logs metadata + prompts to Google Sheets.
+    Expects data_dict to have keys: 'metadata' (dict) and 'replies' (list)
+    """
+    if not GOOGLE_CREDS_JSON: 
+        logger.warning("Google Creds missing. Skipping sheet log.")
+        return
+
     try:
-        # Authenticate with Google
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        
-        # Open Sheet
         sheet = client.open(SHEET_NAME).sheet1
         
-        # Prepare Row: [Date, Option 1, Option 2, Option 3, Status]
+        # Extract Data
+        meta = data_dict.get('metadata', {})
+        replies = data_dict.get('replies', [])
+        
+        # Ensure we have 3 replies to fill columns
+        replies = replies + [""] * (3 - len(replies))
+        
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [timestamp, prompt_options[0], prompt_options[1], prompt_options[2], "PENDING"]
+        
+        # New Row Format:
+        # [Timestamp, Name, Age, Job, Location, Interests, Opt1, Opt2, Opt3, Status]
+        row = [
+            timestamp,
+            meta.get('name', 'Unknown'),
+            meta.get('age', 'Unknown'),
+            meta.get('job', 'Unknown'),
+            meta.get('location', 'Unknown'),
+            ", ".join(meta.get('interests', [])), # Convert list to string
+            replies[0],
+            replies[1],
+            replies[2],
+            "PENDING"
+        ]
         
         sheet.append_row(row)
+        logger.info(f"Successfully logged profile: {meta.get('name', 'Unknown')}")
+        
     except Exception as e:
-        print(f"Logging failed: {e}")
+        logger.error(f"Logging to sheet failed: {e}")
 
 # --- HELPER: EXTRACT FRAMES ---
-def extract_frames(video_path, max_frames=5):
+def extract_frames_as_pil(video_path, max_frames=6):
+    logger.info(f"Extracting frames from {video_path}...")
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames == 0: return []
+    
+    if total_frames == 0: 
+        logger.error("Video has 0 frames.")
+        return []
+    
     interval = max(1, total_frames // max_frames)
-    extracted_frames = []
+    pil_images = []
     current_frame = 0
-    while current_frame < total_frames and len(extracted_frames) < max_frames:
+    
+    while current_frame < total_frames and len(pil_images) < max_frames:
         cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
         ret, frame = cap.read()
         if ret:
-            _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-            b64_frame = base64.b64encode(buffer).decode('utf-8')
-            extracted_frames.append(b64_frame)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb_frame)
+            pil_images.append(pil_img)
         current_frame += interval
+            
     cap.release()
-    return extracted_frames
+    logger.info(f"Extracted {len(pil_images)} frames.")
+    return pil_images
+
+@app.get("/")
+def home():
+    return {"status": "Gemini Wingman is Active"}
 
 @app.post("/analyze-video")
 async def analyze_video(file: UploadFile = File(...)):
-    # 1. Process Video
+    logger.info("Received video upload request.")
+    
+    if not GEMINI_API_KEY:
+        return {"reply": "Error: Server missing Gemini API Key."}
+
+    # 1. Save video temporarily
     temp_filename = f"temp_{file.filename}"
     with open(temp_filename, "wb") as buffer:
         buffer.write(await file.read())
+
+    # 2. Extract frames
+    frames = extract_frames_as_pil(temp_filename)
     
-    frames_b64 = extract_frames(temp_filename)
-    if os.path.exists(temp_filename): os.remove(temp_filename)
+    # 3. Cleanup
+    if os.path.exists(temp_filename):
+        os.remove(temp_filename)
 
-    # 2. Call Grok
-    content_list = [{"type": "text", "text": "Analyze this video. Give me exactly 3 short, witty replies as a JSON list. Example: [\"Reply 1\", \"Reply 2\", \"Reply 3\"]"}]
-    for b64_img in frames_b64:
-        content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
+    if not frames:
+        return {"reply": "Error: Could not process video."}
 
-    payload = {
-        "messages": [
-            {"role": "system", "content": "You are a dating expert. Return ONLY a valid JSON list of 3 strings."},
-            {"role": "user", "content": content_list}
-        ],
-        "model": "grok-vision-beta",
-        "temperature": 0.85
+    # 4. Prepare Prompt for Gemini
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt_text = """
+    You are a witty, Gen-Z dating expert. I am sending frames from a Hinge profile video.
+    
+    Task 1 (Extraction):
+    Analyze the frames to identify the user's Name, Age, Job, Location, and key Interests. 
+    If a field is not visible, return "Unknown".
+    
+    Task 2 (Generation):
+    Generate 3 distinct, high-status, witty opening lines based on the visual hooks or text prompts found.
+    
+    Format:
+    Return ONLY a valid JSON object. No Markdown.
+    {
+        "metadata": {
+            "name": "String",
+            "age": "String",
+            "job": "String",
+            "location": "String",
+            "interests": ["String", "String"]
+        },
+        "replies": ["Reply 1", "Reply 2", "Reply 3"]
     }
+    """
     
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}"}
-    response = requests.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers)
-    
+    input_content = [prompt_text] + frames
+
     try:
-        content_text = response.json()['choices'][0]['message']['content']
-        # Clean the response to ensure it's a list
-        import ast
-        # Attempt to parse the list from the string
-        start_index = content_text.find('[')
-        end_index = content_text.rfind(']') + 1
-        clean_list = ast.literal_eval(content_text[start_index:end_index])
+        logger.info("Sending request to Gemini...")
+        response = model.generate_content(input_content)
+        content_text = response.text
         
-        # 3. LOG DATA TO GOOGLE SHEETS
-        log_to_sheet(clean_list)
+        # Clean JSON
+        clean_text = content_text.replace("```json", "").replace("```", "").strip()
         
-        return {"reply": "\n\n".join(clean_list)} # Return text for the Shortcut to display
+        # Parse JSON
+        try:
+            data_dict = json.loads(clean_text)
+        except json.JSONDecodeError:
+            # Fallback for slight formatting errors
+            import ast
+            data_dict = ast.literal_eval(clean_text)
+
+        logger.info("Gemini response parsed successfully.")
+
+        # 5. Log to Sheets (Async-ish)
+        log_to_sheet(data_dict)
+        
+        # 6. Return ONLY text to iPhone
+        # We join them with newlines so the shortcut displays them cleanly
+        return {"reply": "\n\n".join(data_dict.get('replies', []))}
+        
     except Exception as e:
+        logger.error(f"Error processing: {str(e)}")
         return {"reply": f"Error: {str(e)}"}
