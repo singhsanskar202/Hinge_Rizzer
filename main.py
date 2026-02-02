@@ -90,7 +90,7 @@ def log_to_sheet(data):
 # --------------------------------------------------
 # VIDEO → FRAMES
 # --------------------------------------------------
-def extract_frames_base64(video_path, max_frames=7):
+def extract_frames_base64(video_path, max_frames=6):
     cap = cv2.VideoCapture(video_path)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total == 0:
