@@ -30,7 +30,7 @@ GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")
 SHEET_NAME = "Hinge_Rizz_Tracker"
 
 # ✅ Vision model that follows JSON well
-MODEL_NAME = "qwen/qwen2.5-vl-7b-instruct"
+MODEL_NAME = "allenai/molmo-2-8b:free"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
