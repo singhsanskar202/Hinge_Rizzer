@@ -11,6 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from fastapi import FastAPI, UploadFile, File
 from openai import OpenAI
 import logging
+import re
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
@@ -19,17 +20,13 @@ logger = logging.getLogger("HingeWingman")
 app = FastAPI()
 
 # --- CONFIGURATION ---
-# We use the generic 'openai' client but point it to OpenRouter
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")
 SHEET_NAME = "Hinge_Rizz_Tracker"
 
-# The model you want to use. You can change this string anytime!
-# Recommended free vision models on OpenRouter:
-# "google/gemini-2.0-flash-exp:free" (Very smart, vision native)
-# "google/gemini-flash-1.5-8b"
-# "meta-llama/llama-3.2-11b-vision-instruct:free"
-MODEL_NAME = "allenai/molmo-2-8b:free" 
+# Let's switch to the Llama Vision model. 
+# It is generally better at following "JSON Only" instructions than Molmo.
+MODEL_NAME = "meta-llama/llama-3.2-11b-vision-instruct:free"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -66,7 +63,8 @@ def log_to_sheet(data_dict):
         sheet.append_row(row)
         logger.info(f"Logged to sheet: {meta.get('name')}")
     except Exception as e:
-        logger.error(f"Sheet logging failed: {e}")
+        # Just log error but don't crash app
+        logger.error(f"Sheet logging failed: {str(e)}")
 
 # --- HELPER: EXTRACT FRAMES ---
 def extract_frames_base64(video_path, max_frames=5):
@@ -82,7 +80,7 @@ def extract_frames_base64(video_path, max_frames=5):
         cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
         ret, frame = cap.read()
         if ret:
-            # Resize to save tokens (OpenRouter free tier has limits)
+            # Resize to 512x512 for speed/reliability
             frame = cv2.resize(frame, (512, 512)) 
             _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
             b64_str = base64.b64encode(buffer).decode('utf-8')
@@ -93,17 +91,14 @@ def extract_frames_base64(video_path, max_frames=5):
 
 @app.get("/")
 def home():
-    return {"status": "OpenRouter Wingman is Active"}
+    return {"status": "Wingman Active"}
 
 @app.post("/analyze-video")
 async def analyze_video(file: UploadFile = File(None)):
-    if not file:
-        return {"reply": "Error: No file received. Check Shortcut key is 'file'."}
-    
-    if not OPENROUTER_API_KEY:
-        return {"reply": "Error: OpenRouter API Key missing."}
+    if not file: return {"reply": "Error: No file received."}
+    if not OPENROUTER_API_KEY: return {"reply": "Error: Missing API Key."}
 
-    # 1. Save and Process Video
+    # 1. Process Video
     temp_filename = f"temp_{file.filename}"
     with open(temp_filename, "wb") as buffer:
         buffer.write(await file.read())
@@ -111,22 +106,14 @@ async def analyze_video(file: UploadFile = File(None)):
     frames = extract_frames_base64(temp_filename)
     if os.path.exists(temp_filename): os.remove(temp_filename)
 
-    if not frames:
-        return {"reply": "Error: Could not extract frames."}
+    if not frames: return {"reply": "Error: Video was empty or unreadable."}
 
-    # 2. Build OpenRouter Payload
-    # We construct a list of image messages
-    content_payload = [
-        {"type": "text", "text": "Analyze this dating profile video. Extract metadata (Name, Age, Job, Location, Interests) and write 3 witty, high-status replies based on visual hooks. Return ONLY JSON."}
-    ]
-    
+    # 2. Call AI
+    content_payload = [{"type": "text", "text": "Analyze this dating profile video. Extract metadata and write 3 witty replies. Return valid JSON."}]
     for b64_url in frames:
-        content_payload.append({
-            "type": "image_url",
-            "image_url": {"url": b64_url}
-        })
+        content_payload.append({"type": "image_url", "image_url": {"url": b64_url}})
 
-    logger.info(f"Sending request to OpenRouter model: {MODEL_NAME}")
+    logger.info(f"Sending to model: {MODEL_NAME}")
 
     try:
         completion = client.chat.completions.create(
@@ -134,44 +121,41 @@ async def analyze_video(file: UploadFile = File(None)):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a JSON-only dating assistant. Output format: {\"metadata\": {\"name\": \"...\", \"age\": \"...\", \"job\": \"...\", \"location\": \"...\", \"interests\": []}, \"replies\": [\"...\", \"...\", \"...\"]}"
+                    "content": "You are a JSON-only dating assistant. Output must be valid JSON with keys 'metadata' and 'replies' (list of strings)."
                 },
                 {
                     "role": "user",
                     "content": content_payload
                 }
             ],
-            temperature=0.8,
-            # 'headers' allows us to tell OpenRouter who we are (optional but polite)
-            extra_headers={
-                "HTTP-Referer": "https://render.com",
-                "X-Title": "Hinge Wingman"
-            }
+            temperature=0.7,
         )
 
         response_text = completion.choices[0].message.content
-        logger.info("Received response from OpenRouter.")
-        
-        # 3. Clean and Parse JSON
-        clean_text = response_text.replace("```json", "").replace("```", "").strip()
-        
+        logger.info(f"RAW AI RESPONSE: {response_text}") # <--- THIS WILL SHOW US THE TRUTH
+
+        # 3. Robust JSON Parsing
         try:
-            data_dict = json.loads(clean_text)
-        except:
-            # Simple fallback if model chats too much
-            import ast
-            # Try to find the first { and last }
+            # Strip Markdown code blocks if present
+            clean_text = re.sub(r"```json|```", "", response_text).strip()
+            
+            # Find the first '{' and last '}'
             start = clean_text.find('{')
             end = clean_text.rfind('}') + 1
             if start != -1 and end != -1:
-                data_dict = json.loads(clean_text[start:end])
-            else:
-                return {"reply": clean_text} # Return raw text if JSON fails
-
-        # 4. Log and Return
-        log_to_sheet(data_dict)
-        return {"reply": "\n\n".join(data_dict.get('replies', []))}
+                clean_text = clean_text[start:end]
+                
+            data_dict = json.loads(clean_text)
+            
+            # Log and Return Success
+            log_to_sheet(data_dict)
+            return {"reply": "\n\n".join(data_dict.get('replies', []))}
+            
+        except Exception as e:
+            logger.error(f"JSON Parsing Failed: {e}")
+            # FALLBACK: Return the raw text so you see SOMETHING on your phone
+            return {"reply": f"AI Parsing Error, but here is the raw output:\n\n{response_text}"}
 
     except Exception as e:
         logger.error(f"OpenRouter Error: {str(e)}")
-        return {"reply": f"AI Error: {str(e)}"}
+        return {"reply": f"System Error: {str(e)}"}
