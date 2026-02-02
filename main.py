@@ -29,7 +29,7 @@ SHEET_NAME = "Hinge_Rizz_Tracker"
 # "google/gemini-2.0-flash-exp:free" (Very smart, vision native)
 # "google/gemini-flash-1.5-8b"
 # "meta-llama/llama-3.2-11b-vision-instruct:free"
-MODEL_NAME = "google/gemma-3-27b-it:free" 
+MODEL_NAME = "allenai/molmo-2-8b:free" 
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
