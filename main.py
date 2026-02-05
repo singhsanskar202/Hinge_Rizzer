@@ -31,7 +31,7 @@ GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")
 SPREADSHEET_NAME = "Hinge_Rizz_Tracker"
 WORKSHEET_NAME = "Sheet1"
 
-MODEL_NAME = "google/gemma-3-27b-it:free"
+MODEL_NAME = "mistralai/mistral-small-3.1-24b-instruct:free"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
