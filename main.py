@@ -72,8 +72,8 @@ def log_to_sheet(data):
             meta.get("job"),
             meta.get("education"),
             meta.get("location"),
-            ", ".join(meta.get("interests", [])),
-            ", ".join(meta.get("personality_traits", [])),
+            ", ".join(meta.get("interests", [])) if isinstance(meta.get("interests"), list) else "",
+            ", ".join(meta.get("personality_traits", [])) if isinstance(meta.get("personality_traits"), list) else "",
             meta.get("communication_style"),
             meta.get("vibe"),
             replies[0],
@@ -81,9 +81,6 @@ def log_to_sheet(data):
             replies[2],
             "PENDING"
         ]
-
-        if len(row) != 14:
-            raise ValueError("Row column mismatch")
 
         sheet.append_row(row, value_input_option="USER_ENTERED")
         logger.info("✅ Logged to Google Sheet")
@@ -136,7 +133,8 @@ async def analyze_video(file: UploadFile = File(...)):
         f.write(await file.read())
 
     frames = extract_frames_base64(temp_path)
-    os.remove(temp_path)
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
 
     if not frames:
         return {"error": "Could not extract frames"}
@@ -145,46 +143,13 @@ async def analyze_video(file: UploadFile = File(...)):
     # USER PROMPT
     # --------------------------------------------------
     user_prompt = """
-You are analyzing screenshots of a FEMALE Hinge profile.
-
-Extract metadata using:
-- Visible text
-- UI labels
-- IMPLIED signals (photos, prompts, context)
-
-If unsure, return null. Do NOT hallucinate.
-
+You are analyzing screenshots of a FEMALE Hinge profile. Return ONLY valid JSON.
 Metadata schema:
 {
-  "name": string | null,
-  "age": number | null,
-  "job": string | null,
-  "education": string | null,
-  "location": string | null,
-  "interests": array of strings,
-  "personality_traits": array of strings,
-  "communication_style": string,
-  "vibe": string
+  "name": string, "age": number, "job": string, "education": string, "location": string, 
+  "interests": array, "personality_traits": array, "communication_style": string, "vibe": string
 }
-
-Then generate EXACTLY 3 Hinge like-comments.
-
-Reply rules:
-- Each reply must reference a DIFFERENT observation.
-- Hinglish allowed
-- Subtle poetic / shayari tone (conversational)
-- One curious, one lightly teasing, one calm-confident
-- No generic compliments
-- No emojis
-- No yes/no questions
-- No body comments
-- 1–2 sentences max
-
-Return ONLY valid JSON:
-{
-  "metadata": {...},
-  "replies": ["", "", ""]
-}
+Generate EXACTLY 3 witty replies.
 """
 
     content = [{"type": "text", "text": user_prompt}]
@@ -192,41 +157,22 @@ Return ONLY valid JSON:
         content.append({"type": "image_url", "image_url": {"url": f}})
 
     try:
+        # --- APPLIED YOUR PARAMS HERE ---
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {
                     "role": "system",
-                    "content": """
-You are a high-EQ dating assistant for MEN replying to FEMALE Hinge profiles.
-
-You write messages that feel:
-- human
-- confident
-- observant
-- emotionally intelligent
-
-CRITICAL RULES:
-- Output ONLY valid JSON
-- No markdown or explanations
-- Never mention AI
-- Never sound impressed or desperate
-
-Dating principles:
-- Specificity beats compliments
-- Calm confidence beats humor forcing
-- Observational > validating
-
-Before finalizing each reply, rewrite it mentally to sound like something a real person would casually type.
-Your goal is to maximize reply probability, not to impress.
-"""
+                    "content": "You are a JSON-only dating assistant for MEN. No markdown. Output valid JSON."
                 },
                 {
                     "role": "user",
                     "content": content
                 }
             ],
-            temperature=0.7
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=500  # Set to 500 to prevent JSON truncation
         )
 
         raw = completion.choices[0].message.content
@@ -234,8 +180,13 @@ Your goal is to maximize reply probability, not to impress.
 
         # ---------------- CLEAN JSON ----------------
         clean = re.sub(r"```json|```", "", raw).strip()
-        clean = clean[clean.find("{"): clean.rfind("}") + 1]
-        data = json.loads(clean)
+        start_idx = clean.find("{")
+        end_idx = clean.rfind("}") + 1
+        if start_idx != -1 and end_idx != -1:
+            clean = clean[start_idx:end_idx]
+            data = json.loads(clean)
+        else:
+            raise ValueError("No valid JSON found in response")
 
         # Safety normalization
         replies = data.get("replies", [])
