@@ -31,7 +31,7 @@ GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")
 SPREADSHEET_NAME = "Hinge_Rizz_Tracker"
 WORKSHEET_NAME = "Sheet1"
 
-MODEL_NAME = "mistralai/mistral-small-3.1-24b-instruct:free"
+MODEL_NAME = "nvidia/nemotron-nano-12b-v2-vl:free"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -170,7 +170,7 @@ Metadata schema:
 Then generate EXACTLY 3 Hinge like-comments.
 
 Reply rules:
-- Each reply must reference a DIFFERENT observation
+- Each reply must reference a DIFFERENT observation.
 - Hinglish allowed
 - Subtle poetic / shayari tone (conversational)
 - One curious, one lightly teasing, one calm-confident
